@@ -1,0 +1,904 @@
+---
+title: "R Script from the article 'GPS-tracked vultures indicate a relaxation of conservation
+  commitments in renewable energy development'"
+date: "25/08/2025"
+output:
+  word_document: default
+  html_document:
+    df_print: paged
+---
+
+This notebook documents a standardized and reusable data analysis workflow developed for the manuscript:
+
+> **"*GPS-tracked vultures indicate a relaxation of conservation commitments in renewable energy development*"**
+>
+> *Elena Bravo-Chaparro, Jorge Rodríguez-Pérez, María Fernández-García, José Carlos González, Gerardo Báguena, João Pedro Valente e Santos, Iván Gutiérrez, José Vicente López-Bao, Patricia Mateo-Tomás*
+
+These analyses are designed to compare space use by GPS-tracked wildlife with official planning tools for activities with an environmental impact, e.g., in our case study, we used official environmental sensitivity planning tools to wind energy development.
+
+Here, you could be able to:
+
+1.  Calculate the height above the ground (Step 2) for each location from the elevation above sea level or ellipsoidal height data, typically used in GPS devices (Poessel et al. 2018).
+
+2.  Filter the GPS locations (Step 3) of the tagged species by several parameters (e.g. speed, height, space, accuracy... see Step 3; Gupte et al. 2021). This filtered information is later used to obtain use of space models.
+
+3.  Map space use from the GPS-tracked species you have data on, using Movement-based Kernel Density Estimation - MKDE (Step 3; Benhamou 2011; Benhamou & Riotte-Lambert 2012).
+
+4.  Calculate the level of agreement using AC2 metric (Step 9; see Gwet 2014) between such space use by the tagged species and the ordinal categories (e.g. environmental sensitivity) assigned by official planning tools.
+
+5.  Obtain additional agreement parameters (Step 10) such as the total and relative area in each of the agreement classifications, and the possibility of creating a raster to better visualize the agreement classification in space.
+
+    ::: {style="border-left: 4px solid #007ACC; /* azul RStudio */   background-color: #f9f9f9;   padding: 10px 15px;   margin: 15px 0;   border-radius: 6px;   font-size: 0.95em;"}
+    Please make sure to follow the workflow step by step. Each part of the script is designed to work in sequence, so skipping steps or jumping ahead without reviewing the previous ones might cause errors or unexpected behavior.
+
+    ATTENTION: The working directory will be considered as the folder where this RMD file is saved. All files, read or created, will be relative to this directory.
+    :::
+
+    For any questions, issues, or errors you encounter, please contact: **bravochaparro.elena\@hotmail.com**
+
+------------------------------------------------------------------------
+
+## Step 0: Load required libraries
+
+------------------------------------------------------------------------
+
+```{r,message=FALSE,eval = FALSE, echo=TRUE}
+#Install necessary packages
+install.packages("adehabitatLT")
+install.packages("adehabitatHR")
+install.packages("dplyr")
+install.packages("move")
+install.packages("raster")
+install.packages("readr")
+install.packages("scales")
+install.packages("sf")
+install.packages("sp")
+install.packages("terra")
+install.packages("irrCAC")
+install.packages("devtools")
+devtools::install_github("pratikunterwegs/atlastools")
+
+# Load necessary packages
+library(adehabitatLT)
+library(adehabitatHR)
+library(atlastools)
+library(dplyr)
+library(move)
+library(raster)
+library(readr)
+library(scales)
+library(sf)
+library(sp)
+library(terra)
+library(irrCAC)
+```
+
+------------------------------------------------------------------------
+
+## Step 1: Load and adapt your own dataset
+
+------------------------------------------------------------------------
+
+Load your data set and make sure the column names match the ones expected in the analysis:
+
+-   `Longitude`: GPS longitude (WGS84).
+-   `Latitude`: GPS latitude (WGS84).
+-   `height_msl`: height in meters above seal level, OR `height_ellipsoid`: height in meters above the ellipsoid.
+-   `timestamp`: a time stamp formatted as 'YYYY-MM-DD HH:MM:SS', representing the year, month, day, hour, minute, and second in 24-hour time.
+-   `hdop`: value used to assess the positional accuracy of GPS data (any equivalent metric provided by the GPS device may be treated as HDOP for filtering purposes (e.g. E-obs^TM^ accuracy estimate). During Step 3 you can establish the threshold that will be used to retain only those data points with values below the defined limit, ensuring a minimum level of spatial accuracy.
+-   `ground_speed`: speed may be expressed in different units, such as meters per second (m/s) or kilometers per hour (km/h), depending on the system or data source. When using ground speed for filtering, it is essential to ensure consistency in units and to define appropriate thresholds based on the chosen metric to retain only data points within acceptable speed ranges.
+
+If your data set uses different names, you can rename them using the code below. Make sure to substitute the `old_***_name` for your dataset column name and remove the lines that do not need updating.
+
+```{r,eval = FALSE, echo=TRUE}
+# Load your dataset (replace with your own file path)
+GPS_tracking_data <- read.csv("GPS_tracking_data.csv")
+
+# Rename columns if needed; delete the lines of code that do not need updating 
+GPS_tracking_data <- GPS_tracking_data %>%
+  rename(
+    Longitude = old_Longitude_name,
+    Latitude = old_Latitude_name,
+    height_msl = old_height_msl_name,
+    height_ellipsoid=old_height_ellipsoid_name, 
+    timestamp=old_timestamp_name,
+    hdop=old_hdop_name,
+    ground_speed=old_speed_name
+  )
+```
+
+------------------------------------------------------------------------
+
+## **Step 2: Calculate height above ground**
+
+------------------------------------------------------------------------
+
+Upload a Digital Terrain Model (DTM), to provide elevation data for the study area. The GPS altitude is then compared to the ground elevation extracted from the DTM to obtain the height above the ground.
+
+If your altitude values are referenced to the ellipsoid (\``height_elipsoid`\`), you will need an additional raster containing the geoid height based on an Earth Gravitational Model (EGM) to convert ellipsoidal height to orthometric height (above mean sea level).
+
+::: {style="border-left: 4px solid #007ACC; /* azul RStudio */   background-color: #f9f9f9;   padding: 10px 15px;   margin: 15px 0;   border-radius: 6px;   font-size: 0.95em;"}
+Make sure all spatial data are in the WGS84 coordinate reference system.
+:::
+
+```{r,eval = FALSE, echo=TRUE}
+################################
+############FUNCTION############
+Calculate_height <- function(GPS_tracking_data, output_name, DTM){
+  GPS_tracking_data<- subset(GPS_tracking_data,!is.na(GPS_tracking_data$Longitude))
+  GPS_tracking_data<- subset(GPS_tracking_data,!is.na(GPS_tracking_data$Latitude))
+  
+  projection <- "+proj=longlat +datum=WGS84 +no_defs"
+  GPS_tracking_data <- st_as_sf(GPS_tracking_data, coords = c("Longitude", "Latitude"), remove=FALSE, crs=projection) 
+  
+  GPS_tracking_data$DTM <- terra::extract(DTM, GPS_tracking_data)[,2]
+  
+    #If the heights in the GPS_tracking_data are referenced in ellipsoid we need an additional step: 
+    if ("height_ellipsoid" %in% names(GPS_tracking_data)) {
+      GPS_tracking_data$geoid_undulation <- terra::extract(EGM, GPS_tracking_data)[,2]
+      GPS_tracking_data$height_msl <- GPS_tracking_data$height_ellipsoid - GPS_tracking_data$geoid_undulation
+    }
+  GPS_tracking_data$Height_above_ground <- GPS_tracking_data$height_msl - GPS_tracking_data$DTM
+  
+  GPS_tracking_data <- GPS_tracking_data %>%
+  mutate(
+    Longitude = st_coordinates(.)[,1],
+    Latitude = st_coordinates(.)[,2]
+  )
+  GPS_tracking_data <- st_drop_geometry(GPS_tracking_data)
+  
+  write.csv(GPS_tracking_data, output_name) 
+}
+################################
+
+################################
+############INPUTS##############
+#Read the DTM and the raster containing the geoid height if necessary:
+DTM <- rast("your_DTM.tif")
+EGM <- rast("your_EGM.tif") #Optional see description above
+
+Calculate_height(GPS_tracking_data, "GPS_with_heights.csv", DTM)
+```
+
+------------------------------------------------------------------------
+
+## **Step 3: Filtering data and calculating individual MKDE**
+
+------------------------------------------------------------------------
+
+Before calculating the MKDE (Movement-based Kernel Density Estimation), we can apply a series of filters to clean and adapt the data set (e.g. for dates, velocity, heights, accuracy parameters...). You can customize the filtering process by adjusting the parameters and thresholds in the list of conditions (`config`) applied to the data set. The possible options allowed by the list of `config` are the following:
+
+-   `id`: Character indicating the ID of the individual.
+-   `min_date`: Remove GPS locations before a concrete date, introduced as 'YYYY-MM-DD'.
+-   `max_date`: Remove GPS locations after a concrete date, introduced as 'YYYY-MM-DD'.
+-   `HDOP_limit`: OPTIONAL. Remove points with a higher HDOP (or another equivalent metric of location accuracy). Indicate NA if filtering is not required.
+-   `min_speed_limit`: OPTIONAL. Remove records with lower speeds. Indicate NA if filtering is not required.
+-   `max_speed_limit`: OPTIONAL. Remove records with higher speeds. Indicate NA if filtering is not required.
+-   `min_time_interval_limit`: OPTIONAL. GPS locations with time intervals shorter than the interval limit established here in minutes will be discarded. It is recommended to use the standard frequency of the GPS allowing for a small tolerance. Not re-sampling the data could lead to intensive calculation times. Indicate NA if filtering is not required.
+-   `limits_sf`: OPTIONAL. Polygon, in shapefile format, delimiting the area outside which locations will be removed. Indicate NA if filtering is not required.
+-   `height_limits`: OPTIONAL. A list specifying the minimum and maximum height limits above the ground, including the errors (these should include the highest error admitted for the GPS and the resolution and accuracy of the DTM used; see Katzner et al. 2012). If you apply this filter, the locations without calculated heights will be discarded. Indicate NA if filtering is not required.
+-   `adyacent_locations`: Set to TRUE to include adjacent locations in time (within `Tmax`\~see below) in the analysis, even if they do not meet the defined thresholds: `min_speed_limit` and `height_limits`. This option can be set to TRUE when you are filtering the data by height and velocity (e.g. to identify the areas at risk of collision with wind turbines) but you want to be conservative and include in the model calculation those tracks where at least a section of them meets the defined thresholds.
+-   `population`: Name or ID of the population of the tagged individual (as character).
+-   `species`: Name of the species of the tagged individual (as character).
+-   `local_crs`: Local projected CRS, in meters, of your study area. The latitude and longitude GPS locations will be re-projected to this local CRS
+-   `extent_raster`: A vector indicating the extension of the raster of your study area c(xmin, xmax, ymin, ymax). These values must be in projected coordinates (meters), matching the CRS previously specified.
+-   `resolution_raster`: Value indicating the resolution of the pixels of the output raster (in meters).
+-   `raster_path`: Name of the output raster plus .tiff at the end, e.g. *"OutputRaster.tiff"*
+-   `MKDE_parameters`: a list specifying the MKDE parameter values (More detailed explanations of these parameters can be checked in `BRB` function of R package **adehabitatHR**;Calenge 2023):
+    -   `Tmax`: Exclude from the calculations paths between locations that are more further apart in time than `Tmax` seconds.
+
+    -   `Lmin`: Minimum distance (in meters) between successive locations that could be assumed to be an event of intensive use or resting.
+
+    -   `hmin`: Minimum smoothing parameter (in meters), which should incorporate the standard deviation of the localization errors as well as a random component inherent to animal behavior (see Benhamou & Cornélis 2010).
+
+    -   `maxt`: Maximum time (in seconds) an individual can remain outside a patch (of radius `hmin`\*3) before a new visit is considered for the tracks weight calculations.
+
+    -   `filtershort`: Logical that must be set to `TRUE` if track segments lower than `Lmin` are assumed to correspond to resting periods, and `FALSE` otherwise.
+
+After filtering, the MKDE individual raster is saved in a newly created *MKDE* folder in your working directory. In addition, during this step, key statistics (e.g. duration of tracking) for each individual are also extracted and stored in a new folder called *info*. These metrics can be later used to **weight individual contributions** in the calculation of the population-level MKDE (Step 4).
+
+```{r,eval = FALSE, echo=TRUE}
+################################
+############FUNCTION############
+filter_and_MKDE <- function(dataset, config){
+
+  #We generate a csv to save data that might be useful afterwards to, for example, weight individual contributions when calculating population models
+  csv <- data.frame(id = config$id)
+  csv$species<-config$species
+  csv$population<-config$population
+  csv$min_date<-config$min_date
+  csv$max_date<-config$max_date
+  csv$raster_name<-config$raster_name
+  
+  #We remove duplicates: 
+  dataset$timestamp <- as.POSIXct(dataset$timestamp, format = "%Y-%m-%d %H:%M:%S",tz = "UTC")
+  dataset<-dataset[!duplicated(dataset$timestamp), ]
+
+  #Optional filter by HDOP values:
+  if (is.na(config$HDOP_limit)==FALSE){
+    dataset<-filter(dataset, hdop <= config$HDOP_limit)
+  }
+
+  #Optional filter by maximum velocity values:
+  if (is.na(config$max_speed_limit)==FALSE){
+    dataset<-filter(dataset,ground_speed<=config$max_speed_limit)
+  }
+  
+  #Optional filter by minimum velocity values:
+  if (is.na(config$min_speed_limit)==FALSE & config$adyacent_locations == FALSE){
+    dataset<- filter(dataset, ground_speed >= config$min_speed_limit)
+  }
+  
+  
+  #Optional spatial filter by shapefile layer: 
+  if (is.na(config$limits)==FALSE){
+    dataset <- atl_filter_bounds(dataset, 
+                                 x = "Longitude", y = "Latitude", 
+                                 sf_polygon = config$limits, 
+                                 remove_inside = FALSE )  
+  }
+  
+  #Optional heights filter:
+  if (is.na(config$height_limits)==FALSE & config$adyacent_locations == FALSE){
+      min_height <- config$height_limits$Height_above_ground["min"]
+      max_height <- config$height_limits$Height_above_ground["max"]
+    
+      
+      dataset <- filter(dataset, Height_above_ground >= min_height & Height_above_ground <= max_height)
+
+      dataset <- dataset[!is.na(dataset$risk), ]
+  }
+
+  #Filter by dates:
+  dataset$min_date<-config$min_date
+  dataset$max_date<-config$max_date
+  dataset$date<-as.Date(dataset$timestamp)
+  
+  dataset <- atl_filter_covariates (data = dataset ,
+                                      filters = c ("date>=min_date","date<=max_date"))
+          #OPTIONAL:
+          #The code below should only be applied to individuals where an additional intermediate date filter is neccessary due to cases involving the recovery and release of injured individuals
+          #dataset$min_date1<-'2020-07-12'
+          #dataset$max_date1<-'2020-10-18'
+          #dataset <- subset(dataset, !(date > min_date1 & date < max_date1))
+  
+    #OPTIONAL lower time interval filter:
+    if (is.na(config$min_time_interval_limit)==FALSE){
+            i <- 1
+      while (i < nrow(dataset)) {
+        time_interval <- as.numeric(difftime(dataset$timestamp[i + 1], dataset$timestamp[i], units = "mins"))
+        if (time_interval > config$min_time_interval_limit) {
+          i <- i + 1
+        } else {
+          dataset <- dataset[-(i + 1), ]
+        }
+      }
+    }
+
+    #OPTIONAL to include inmmediate adyacent locations.
+    if (config$adyacent_locations==TRUE){
+      #We include here a selection of the a priori locations we want to consider
+      min_height <- config$height_limits$Height_above_ground["min"]
+      max_height <- config$height_limits$Height_above_ground["max"]
+      dataset$locations <- ifelse(dataset$ground_speed >= config$min_speed_limit & dataset$Height_above_ground >= min_height & dataset$Height_above_ground <= max_height,1, 0)
+      
+      #We create a new column with the interval between locations in minutes:
+        dataset <- dataset %>%
+          arrange(timestamp) %>%
+          mutate(time_interval = as.numeric(difftime(lead(timestamp), timestamp, units = "mins"))) 
+       
+      #Now we include in our selection the adyacent locations of our previous selection closer in time than Tmax:   
+        for (i in 1:(nrow(dataset)-1)){
+              x<-i+1
+              xx<-dataset$locations[x]
+              xi<-dataset$locations[i]
+              dataset$locations[i] <- ifelse(dataset$time_interval[i] <= (config$MKDE_parameters$Tmax/60) & xi == 0 & xx == 1, 0.5, dataset$locations[i])
+              dataset$locations[x] <- ifelse(dataset$time_interval[i] <= (config$MKDE_parameters$Tmax/60) & xi == 1 & xx == 0, 0.5, dataset$locations[x])
+        }
+    #We keep only the selected locations:
+    dataset <- subset(dataset, locations > 0)
+    }
+  
+    #Here we save the numer of days with at risk data
+    csv$n_days<-length(unique((dataset$date)))
+  
+  #We reproject the location to the local CRS:
+  xy<-data.frame(location.long=dataset$Longitude,location.lat=dataset$Latitude)
+  coordinates(xy) <- c("location.long", "location.lat")
+  proj4string(xy) <- CRS("+proj=longlat +datum=WGS84")
+  xy_UTM <- spTransform(xy, CRS(config$local_crs))
+  xy_UTM<-coordinates(xy_UTM)
+  
+  DateTime<-dataset[,"timestamp"]
+  DateTime<-as.POSIXct(strptime(as.character(DateTime$timestamp),"%Y-%m-%d %H:%M:%S", tz="UTC"))
+  
+  #We calculate class ltraj neccesary for the MKDE model: 
+  dataset_tr<-as.ltraj(xy_UTM, date=DateTime, id=config$id, typeII = TRUE)
+  
+  #Before calculating the model we prepare the base raster where we are going to store the data:
+  y<-raster()
+  projection(y) <- config$local_crs
+  e <- extent(config$extent_raster)
+  y<-setExtent(y,ext=e)
+  res(y)<-config$resolution_raster
+  y2 <- as(y, 'SpatialPixels')
+
+  #We calculate the difussion parameter and the MKDE model: 
+  Tmax_value<-config$MKDE_parameters$Tmax
+  Lmin_value<-config$MKDE_parameters$Lmin
+  hmin_value<-config$MKDE_parameters$hmin
+  maxt_value<-config$MKDE_parameters$maxt
+  filtershort_value<-config$MKDE_parameters$filtershort
+  
+    D<-BRB.D(dataset_tr, Tmax = Tmax_value,Lmin = Lmin_value,  activity = NULL)
+
+    dataset_BRB<-BRB(dataset_tr,D,Tmax=Tmax_value, Lmin=Lmin_value,maxt=maxt_value, radius=(hmin_value*3), type = "RD", hmin=hmin_value,filtershort=filtershort_value,grid = y2, activity = NULL)
+  
+  #We transform it to dataframe and create a raster 
+  ud1<-dataset_BRB
+  ud1<-as.data.frame.estUD (ud1)
+  
+  ud1 <- ud1[, c("x", "y", "dens")]
+
+  raster_Ind <- rasterFromXYZ(ud1)
+  projection(raster_Ind)<-config$crs
+  
+  #We estandarize the raster
+  sum_values <- cellStats(raster_Ind, sum)
+  raster_est <- raster_Ind / sum_values
+  crs(raster_est) <- config$local_crs
+  
+  #We generate folders to organise the result data:
+    population_folder<-config$population
+    if (!dir.exists(population_folder)) {
+      dir.create(population_folder)
+      if(!dir.exists(paste0(population_folder,"/MKDEs"))){
+        dir.create(paste0(population_folder,"/MKDEs"))
+      }
+      if(!dir.exists(paste0(population_folder,"/info"))){
+        dir.create(paste0(population_folder,"/info"))
+      }
+    }
+  
+  #We save the result and the information
+  writeRaster(raster_est, paste0(population_folder,"/MKDEs/",config$raster_path), format = "GTiff")
+  write.csv(csv,file=paste0(population_folder, "/info/",config$id,"_info.csv"))
+}
+################################
+
+
+################################
+############INPUTS##############
+#Then read your data and run the function for each individual:
+GPS_with_heights <- read.csv("GPS_with_heights.csv")
+#To run the function first create a configuration object (config) with information to adapt the filter to your data:
+config<-list(
+  id="01",
+  min_date="2025-09-01",
+  max_date="2025-09-24", 
+  HDOP_limit=5,
+  min_speed_limit=14.4, 
+  max_speed_limit=130, 
+  min_time_interval_limit = 9.5, 
+  limits_sf=NA, 
+  height_limits = list("Height_above_ground" = c(min = -35, max = 235)), 
+  adyacent_locations=TRUE, 
+  population="West", 
+  species="Gyps_fulvus", 
+  local_crs= "+proj=utm +zone=30 ellps=WGS84", 
+  extent_raster=c(3000,630000,3700000,4900000), 
+  resolution_raster=100, 
+  raster_path="MKDE.tif", 
+  MKDE_parameters = list( 
+    Tmax = 1260,   
+    Lmin = 20, 
+    hmin = 400, 
+    maxt = 400, 
+    filtershort=FALSE 
+  )
+)
+
+filter_and_MKDE(GPS_with_heights, config)
+```
+
+------------------------------------------------------------------------
+
+## **Step 4: Calculating population MKDE**
+
+------------------------------------------------------------------------
+
+After calculating MKDEs for each GPS-tagged individual, we can calculate population MKDEs by weighting each individual and grouping them by population (already identified in the `config` list and saved in the *info* file created in the previous step).
+
+-   OPTIONAL: The parameter `weighted_column` of the function "`calculate_population`", should be the name of the column we want to use to weight each individual (e.g. `n_days`). If this parameter is not included, each individual will receive the same weight when calculating the population.
+-   OPTIONAL: the parameter `wd` allows to input the path whith the folders *MKDE* and *info* (automatically calculated with the previous function `filter_and_MKDE`). If this parameter is not specified, the actual working directory is used.
+
+```{r,eval = FALSE, echo=TRUE}
+################################
+############FUNCTION############
+calculate_population<-function(weighted_column=NA,wd=NA){
+  if(is.na(wd)==TRUE){
+    folders <- list.dirs(getwd(), recursive = FALSE)
+  }else{
+    folders <- list.dirs(wd, recursive = FALSE)
+  }
+  #First we read all the files in the info folders: 
+    populations_info <- list()
+    for (folder in folders){
+      path_info<-file.path(folder, "info")
+        if (dir.exists(path_info)) {
+          combined_info <- data.frame()
+          files <- list.files(path_info, full.names = TRUE)
+          for (file in files){
+              df<-read.csv(file)
+              df$id<-as.character(df$id)
+              combined_info<-bind_rows(combined_info,df)
+          }
+          write.csv(combined_info, file = paste0(folder,"/", basename(folder), "_population_info.csv"))
+        }
+    }
+  
+  #Now we read the individual MKDE raster for each population, weight them based on the file we just generated (population_info.csv), using the variable we are interested in.
+    for (folder in folders){
+      path_raster<-file.path(folder, "MKDEs")
+        if (dir.exists(path_raster)) {
+          combined_raster <- list()
+          raster_files <- list.files(path_raster, full.names = TRUE)
+          for (rast in raster_files){
+              combined_raster[[rast]] <- raster(rast)
+          }
+          
+          #Now we weight each individual raster and sum them up to generate a population raster
+         weighted_raster <- list()
+         for (i in 1:length(combined_raster)) {
+            w_rast <- combined_raster[[i]]
+             if (!is.na(weighted_column)) {
+                weight <- as.numeric(combined_info[[weighted_column]][i] / sum(combined_info[[weighted_column]][i]))
+             }else{
+               weight <- 1/length(combined_raster)
+             }
+
+            w_rast <- w_rast * weight
+            weighted_raster[[i]] <- w_rast
+          }
+          
+         #We sum all the pondered rasters:
+          total_sum <- sum(stack(weighted_raster), na.rm = TRUE)
+          
+         #We save the obtained population raster
+          writeRaster(total_sum, filename = paste0(folder,"/",basename(folder),"_population"), format = "GTiff")
+        }
+    }
+}
+################################
+
+
+################################
+############INPUTS##############
+calculate_population(wd= "Step 4", weighted_column="n_days")
+```
+
+------------------------------------------------------------------------
+
+## **Step 5: Calculating species MKDE**
+
+------------------------------------------------------------------------
+
+If you have several populations of the same species, you can merge such population maps to generate a single species-level map. To do this, you must specify:
+
+-   `Populations_raster`: a vector indicating the file paths to the .tif raster files corresponding to each population.
+-   `weights`: a vector indicating the relative importance or contribution of each population to the final map (must be in the same order as the file paths and should sum up to 1). NA should be indicated if you want to give the same weight to all the populations.
+-   `path_name`: path name where you want to save the new species MKDE.
+
+The code below will use these inputs to compute a weighted average of the population maps, resulting in a unified species distribution map of space use.
+
+```{r,eval = FALSE, echo=TRUE}
+################################
+############INPUTS##############
+  Populations_raster<-c("West/West_population.tif","East/East_population.tif")
+  weights <- c(NA, NA)
+  path_name<-"Species_MKDE"
+
+  
+################################
+###########RUN CODE#############  
+  #Here the species MKDE is calculated and saved
+  if (any(is.na(weights))) {
+    Species_MKDE <- sum(stack((Populations_raster)), na.rm = TRUE)
+    Species_MKDE <- Species_MKDE/length(Populations_raster)
+  }else{
+    Species_MKDE <- rast(Populations_raster[[1]]) * weights[1]
+      for (i in 2:length(Populations_raster)) {
+          Species_MKDE <- Species_MKDE + rast(Populations_raster[[i]]) * weights[i]
+    }
+  }
+  writeRaster(Species_MKDE, path_name, format="GTiff")
+
+```
+
+------------------------------------------------------------------------
+
+## **Step 6: Overlapping MKDE maps with planning tools**
+
+------------------------------------------------------------------------
+
+With the following code you can join the MKDE values with the official planning tool values by location. To optimize processing time, it is recommended to first **filter the MKDE raster using a shapefile that defines the study area.** Afterwards, the raster is converted to points which are later used to efficiently extract values from the planning tools raster(s) or shapefile(s) by overlaying them with these points. The inputs you need to specify are:
+
+-   `MKDE_file`: the path to the species MKDE raster file created in the previous step.
+-   `study_area`: the path to the study area shapefile used to filter the raster and enhance processing time.
+-   `Planning_tool_sf`: the path to the shapefile of the planning tool considered.
+    -   `column_interest_sf`: the name of the column of the `Planning_tool_sf` where the sensitivity or other information of interest is stored. It will maintain the same name in the `Overlapped_DataBase` generated in this step.
+-   `Planning_tool_r`: the path to the raster of the planning tool considered.
+    -   `column_interest_r`: the name you want to give the values of this raster planning tool in the `Overlapped_DataBase` generated in this step.
+
+::: {style="border-left: 4px solid #007ACC; /* azul RStudio */   background-color: #f9f9f9;   padding: 10px 15px;   margin: 15px 0;   border-radius: 6px;   font-size: 0.95em;"}
+ATENTION: if you want to consider other variables besides the one of interest included in the planning tool (e.g. site), be sure to extract them using this code. This allows you to calculate agreement values for this new variables, for example, if you extract the variable site, you could later obtain a different agreement value for each of the considered sites.
+:::
+
+```{r,eval = FALSE, echo=TRUE}
+################################
+############INPUTS##############
+  #First upload and read the data needed: 
+  MKDE_file<-rast("Species_MKDE.tif")
+  study_area <- vect("Study_area.shp")
+  #Planning tool shapefile: 
+  Planning_tool_sf <- st_read("YOUR PLANNING TOOL.shp")
+    column_interest_sf <- "NAME OF THE COLUMN OF INTEREST" 
+  #Planning tool raster:
+  Planning_tool_r <- rast("YOUR PLANNING TOOL.tif")
+    column_interest_r <- "NAME YOU WANT TO GIVE THIS COLUMN"
+
+    
+################################
+###########RUN CODE#############        
+#Then filter the raster with the study area polygon:
+    study_area <- project(study_area, crs(MKDE_file))
+    MKDE_file <- crop(MKDE_file, study_area) |> mask(study_area)
+  
+  #Then transform the raster to points:
+    points_sf<-as.points(MKDE_file)
+    points_sf <- st_as_sf(points_sf)
+  
+#The next steps consist of reading the official planning tool maps:
+  #If the planning tool map is a shapefile: 
+    Planning_tool_sf <- st_transform(Planning_tool_sf, st_crs(points_sf))
+    Planning_tool_sf <- Planning_tool_sf %>% dplyr::select(all_of(column_interest_sf))
+    points_sf <- st_join(points_sf, Planning_tool_sf)
+    
+  #If the planning tool map is a raster you can overlap them using this code:  
+    crs_projs <- as.character(crs(MKDE_file))
+    points_sf <- st_transform(points_sf, crs(Planning_tool_r))
+    r_values <- terra::extract(Planning_tool_r, vect(points_sf))
+    points_sf[[column_interest_r]] <- r_values[,2]
+    points_sf <- st_transform(points_sf, crs(MKDE_file))
+
+  #When you have all the data of interest you can save this information as a dataframe or shapefile for the following analysis: 
+    points_df <- as.data.frame(points_sf)
+    coords <- st_coordinates(points_sf)
+    points_df <- points_df %>%mutate(x = coords[, 1],y = coords[, 2])  
+    points_df <- points_df %>% dplyr::select(-geometry)
+    Overlapped_DataBase<- points_df
+
+    write.csv(Overlapped_DataBase, "Overlapped_DataBase.csv", row.names = FALSE)
+```
+
+------------------------------------------------------------------------
+
+## **Step 7: Threshold Home-Range Calculation**
+
+------------------------------------------------------------------------
+
+Home range thresholds are calculated in this step, as they are necessary for the **reclassification** of the MKDE raster into discrete categories of space use intensity. These thresholds represent the percentage of the animal's utilization distribution, such as the **core area** (typically the 50% threshold), or broader ranges like 75% or 95%.
+
+::: {style="border-left: 4px solid #007ACC; /* azul RStudio */   background-color: #f9f9f9;   padding: 10px 15px;   margin: 15px 0;   border-radius: 6px;   font-size: 0.95em;"}
+We modified the `computeContourValues` function of the **mkde** R package (Tracey et al. 2024) to admit raster data instead of only mkde objects.
+:::
+
+```{r,eval = FALSE, echo=TRUE}
+################################
+############FUNCTION############
+  #We modified the computeContourValues function of the mkde R package into the threshold function to admit raster data instead of only mkde objects: 
+  threshold<-function (MKDE_file, prob) {
+    #We add this line to transform the raster to dataframe:
+    MKDE_file <- as.data.frame(MKDE_file, xy = TRUE)
+    #We add this line to obtain only the density values:
+    mkde.obj <- MKDE_file[[3]]
+    a <- 1 - prob
+    d2 <- sort(c(mkde.obj))
+    d3 <- cumsum(d2)/sum(d2)
+    nq <- length(a)
+    thresh <- rep(NA, nq)
+    for (i in 1:nq) {
+      j <- stats::na.omit(which(d3 <= a[i]))
+      if (length(j) > 0) {
+        thresh[i] <- d2[max(j)]
+      }
+    }
+    Species_MKDE_Thresholds<-data.frame(prob = prob, threshold = thresh)
+  }
+################################
+
+  
+  
+################################
+############INPUTS##############
+  #Read the Species MKDE raster:
+  MKDE_file<-rast("Species_MKDE.tif")
+  
+  #Compute the threshold function:
+  Species_MKDE_Thresholds<-threshold(MKDE_file,c(0.25,0.5,0.75,0.95))
+  
+  #We add this line to directly save the threshold file:
+  write.csv(Species_MKDE_Thresholds, file=paste0(names(MKDE_file)[3],"_Thresholds.csv"))
+```
+
+------------------------------------------------------------------------
+
+## **Step 8: Reclassifying the information of the general database**
+
+------------------------------------------------------------------------
+
+Now we can reclassify space use by our species of interest into several categories with different intensity of use, by using the information of the thresholds calculated in step 7. In addition, you have to reclassify the planning tools categories into the same number and names of the categories established for the space use maps (e.g. 1, 2, 3, 4). The reclassification and equivalence of categories between space use maps and planning tools is necessary to compare both and obtain the agreement metrics in steps 9 and 10. Make sure that:
+
+-   You reclassify the original values using ordinal numbers (e.g. 1, 2, 3, 4) , with the higher numbers correspond to the higher use of space and planning tool protection categories, for the correct functioning of the script.
+
+-   For each column you reclassify you should specify the original not reclassified column (`Original_Name_column`) and the name you want to give the new reclassified column (`Reclass_Name_column`). You will have to change these parameters for each column that you want to reclassify (e.g. different species MKDE values or different planning tools).
+
+-   Two different sections in the code are included:
+
+    -   `SPECIES MKDE RECLASSIFICATION`: here you can reclassify the MKDE columns. This reclassification depends on the Species_MKDE_Thresholds calculated in Step 7.
+
+    -   `PLANNING TOOL RECLASSIFICATION`: here you can reclassify the planning tool columns by the criteria you consider appropriate (see the reference paper for an example).
+
+```{r,eval = FALSE, echo=TRUE}
+################################
+############INPUTS##############
+#First read the overlapped database and threshold values: 
+  Overlapped_DataBase<-read.csv("Overlapped_DataBase.csv")
+
+  
+###SPECIES MKDE RECLASSIFICATION###  
+  
+#And specify the name of the MKDE column (normally the name of the MKDE raster) and a new name for the reclassified column. At the left the original value and at the right the corresponding new value:
+  Species_MKDE_Thresholds<-read.csv("Species_MKDE_Thresholds.csv")
+  Original_Name_column<-"Your Original Column Name" 
+  Reclass_Name_column<-"Species_MKDE_reclass" 
+     
+  Overlapped_DataBase <- Overlapped_DataBase %>%
+  mutate(!!Reclass_Name_column := case_when(
+    Overlapped_DataBase[[Original_Name_column]]>= Species_MKDE_Thresholds$threshold[Species_MKDE_Thresholds$prob == 0.25] ~ 4,
+    Overlapped_DataBase[[Original_Name_column]]>= Species_MKDE_Thresholds$threshold[Species_MKDE_Thresholds$prob == 0.5] & Overlapped_DataBase[[Original_Name_column]] < Species_MKDE_Thresholds$threshold[Species_MKDE_Thresholds$prob == 0.25] ~ 3,
+    Overlapped_DataBase[[Original_Name_column]]>= Species_MKDE_Thresholds$threshold[Species_MKDE_Thresholds$prob == 0.75] & Overlapped_DataBase[[Original_Name_column]] < Species_MKDE_Thresholds$threshold[Species_MKDE_Thresholds$prob == 0.5] ~ 2,
+    Overlapped_DataBase[[Original_Name_column]]>= Species_MKDE_Thresholds$threshold[Species_MKDE_Thresholds$prob == 0.95] & Overlapped_DataBase[[Original_Name_column]] < Species_MKDE_Thresholds$threshold[Species_MKDE_Thresholds$prob == 0.75] ~ 1,
+    Overlapped_DataBase[[Original_Name_column]]< Species_MKDE_Thresholds$threshold[Species_MKDE_Thresholds$prob == 0.95] ~ NA_real_ 
+  ))
+
+  
+  ###PLANNING TOOL RECLASSIFICATION###
+  
+#Reclassifying the categories of the official planning tool maps. At the left the original value and at the right the corresponding new value:
+  Original_Name_column<-"Your Original Column Name" #Change this based on the corresponding planning tool column of the overlapped data base. 
+  Reclass_Name_column<-"Planning_tool_reclass"
+  
+  Overlapped_DataBase <- Overlapped_DataBase %>%
+        mutate(!!Reclass_Name_column := case_when(
+            Overlapped_DataBase[[Original_Name_column]] == 4 ~ 1, 
+            Overlapped_DataBase[[Original_Name_column]] == 3 ~ 2,
+            Overlapped_DataBase[[Original_Name_column]] == 2 ~ 3,
+            Overlapped_DataBase[[Original_Name_column]] == 1 ~ 3,
+            Overlapped_DataBase[[Original_Name_column]] == 0 ~ 4
+          )
+        )
+  
+  #At the end you can save the new reclassified database: 
+  write.csv(Overlapped_DataBase, file="Reclassified_Database.csv")
+```
+
+------------------------------------------------------------------------
+
+## **Step 9: Calculating the percentage of agreement**
+
+------------------------------------------------------------------------
+
+Once the data is reclassified by categories the percentage of agreement (pa) between the categories in the species' space use map and those of the official planning tool (e.g. environmental sensitivity to wind energy) can be calculated, together with its confidence interval (pa_ci). In order to do this you should specify:
+
+-   `Reclass_DataBase`: the reclassified database path.
+-   `PossibleCategories`: a vector indicating the possible values established during the reclassification.
+-   `Species_MKDE_column_reclass`: the name you gave the MKDE reclassification column in step 8.
+-   `planningTool_reclass`: the name you gave the planning tool reclassification column in step 8.
+
+In addition you can select several additional and optional parameters for the pa calculation function:
+
+-   `truncate`: if this option is set to `TRUE`, when the reclassification values in the planning tool are higher than those assigned to the species, this option will adjust them to match the species' value. This option is useful when the planning tools are considering more species than the one being evaluated and you do not want to consider as miss classifications the areas where the planning tool has a higher sensitivity.
+
+-   `minDiscard`: if this option is set to `TRUE`, the lowest reclassified category values in the species' space use (MKDE) will be excluded before calculating the agreement. This option is particularly useful when the truncate option is applied, as it prevents the lowest category from being included which would otherwise always be considered as good agreement.
+
+-   `extraVariableName` & `extraVariableCategory`: you can indicate in the `calculate_pa` these parameters (characters) to filter the `Reclass_DataBase` before calculating the agreement. The `extraVariableName` should indicate the name of the column you want to filter, and the `extraVariableCategory` should indicate the name of the category you want to keep. This option allows you, for example to filter by different sites and obtaining a pa value for each of the sites. Take into account that this `extraVariableName` column should be previously extracted in step 6.
+
+This code allows you to calculate one percentage of agreement value for each pair of map-tool compared. If you want to calculate several, for different sites, planning tools or species, just repeat the `calculate_pa` function with the different parameters.
+
+```{r,eval = FALSE, echo=TRUE}
+################################
+############FUNCTION############ 
+  #Apply this function to obtain the percentage of agreement values: 
+  calculate_pa<-function(ReclassDataBase,Species_MKDE_column, planningTool, truncate=FALSE, minDiscard=FALSE, extraVariableName=NA, extraVariableCategory= NA){
+    #Read the ReclassDataBase:
+    ReclassDataBase<- read.csv(ReclassDataBase)
+    
+    #OPTIONAL: filter by extra variable
+    if(is.na(extraVariableName)==FALSE){
+      ReclassDataBase <- ReclassDataBase %>% filter(ReclassDataBase[[extraVariableName]] == extraVariableCategory)
+    }
+    
+    #OPTIONAL: truncate the ReclassDataBase so that when the planning tool is higher that the use of space of each species, the planning tool equals the value of the species category:
+    if(truncate==TRUE){
+    ReclassDataBase$truncate_MKDE <- ifelse(ReclassDataBase[[planningTool]] > ReclassDataBase[[Species_MKDE_column]], 
+                                 ReclassDataBase[[Species_MKDE_column]], 
+                                 ReclassDataBase[[planningTool]])
+    }
+    
+    
+    #OPTIONAL: Here remove the cases where the use of space is lower than the minimum value or NA
+    if(minDiscard==TRUE){
+    min_value<-min(na.omit(ReclassDataBase[[Species_MKDE_column]]))
+    subset_DataBase <- ReclassDataBase[!is.na(ReclassDataBase[[Species_MKDE_column]]) & ReclassDataBase[[Species_MKDE_column]] != min_value, ]
+    }
+    
+    
+    #Obtain the proportion of agreement values, and generate the information for the new dataframe of results: 
+    AC <- pa.coeff.raw(cbind(subset_DataBase[[Species_MKDE_column]], subset_DataBase$truncate_MKDE), weights = "ordinal",categ.labels = PossibleCategories,  N=Inf)
+    nueva_fila <- data.frame(SpeciesMKDE=Species_MKDE_column,
+                             extraVariable = extraVariableCategory, 
+                             PlanningTool = planningTool, 
+                             pa = AC[["est"]][["pa"]], 
+                             pa_ci = AC[["est"]][["conf.int"]])
+    df <- rbind(df, nueva_fila)
+  }
+################################
+
+################################
+############INPUTS##############
+#Create a new data frame to store the information and results: 
+  df <- data.frame(
+    SpeciesMKDE = character(),
+    extraVariable = character(),
+    PlanningTool = character(),
+    pa = numeric(),
+    pa_ci = numeric()) 
+  
+  
+  #Indicate the path to the reclassified database and identify the possible categories: 
+  ReclassDataBase<-"Reclassified_Database.csv"
+  PossibleCategories<-c(1,2,3,4)
+  Species_MKDE_column_reclass<-"Species_MKDE_reclass"
+  planningTool_reclass<-"Planning_tool_reclass"
+  
+  #The pa is then calculated using this function To calculate various pa values just repeat this line but changing the possible combinations of planning tools, species, etc. 
+  df<-calculate_pa(ReclassDataBase, Species_MKDE_column=Species_MKDE_column_reclass, planningTool=planningTool_reclass, truncate=TRUE, minDiscard=TRUE, extraVariableName=NA, extraVariableCategory= NA)
+
+  #Save the new dataframe:
+  write.csv(df, file="Pa_values.csv")   
+
+```
+
+------------------------------------------------------------------------
+
+## Step 10: Additional information parameters
+
+------------------------------------------------------------------------
+
+With this step, in addition of the percentage of agreement, you can calculate information regarding the total and relative area that falls under each kind of agreement (e.g. perfect match, one level of distance, two level of distances, etc).
+
+In addition, it offers the option of calculating agreement rasters for a better visualization of the agreement analysis. These rasters are generated by subtracting the reclassified values of the species space use (MKDE) from those of the planning tool so that a value of 0 indicates agreement, while higher or lower values reflect the intensity of disagreement.
+
+::: {style="border-left: 4px solid #007ACC; /* azul RStudio */   background-color: #f9f9f9;   padding: 10px 15px;   margin: 15px 0;   border-radius: 6px;   font-size: 0.95em;"}
+Attention: depending on the resolution and the extension of the result maps, calculating the agreement raster might need significant memory.
+:::
+
+```{r,eval = FALSE, echo=TRUE}
+################################
+############FUNCTION############
+calulateStatistics<-function(DataBase,SpeciesMKDE, PlanningTool, raster=FALSE, OriginRasterPath=NA, NewRasterPath=NA){
+  
+    #We save the statistics info in this dataframe:
+  statisticsValues <- data.frame(
+    SpeciesMKDE=character(),
+    PlanningTool = character(), 
+    Site=character(),
+    totalArea=numeric(),
+    totalAgreementArea= numeric(), 
+    relativeAgreementArea= numeric(),
+    oneLevelAreaMiss=numeric(), 
+    oneLevelRelativeAreaMiss=numeric(),
+    twoLevelAreaMiss=numeric(), 
+    twoLevelRelativeAreaMiss=numeric(),
+    threeLevelAreaMiss=numeric(),
+    threeLevelRelativeAreaMiss=numeric(),
+    stringsAsFactors = FALSE)
+  
+    points_sf <- st_as_sf(DataBase, coords = c("x", "y"), crs = local_crs)
+    
+      Miss_name <- paste0("Miss_", PlanningTool)
+      points_sf <- points_sf[!is.na(points_sf[[SpeciesMKDE]]), ]
+      points_sf[[Miss_name]] <- points_sf[[SpeciesMKDE]] - points_sf[[PlanningTool]]
+      points_sf[[Miss_name]] <-ifelse( points_sf[[SpeciesMKDE]] == 1, NA, points_sf[[Miss_name]]) 
+      
+      #OPTIONAL: calculate the missclassification raster:
+      if (raster==TRUE){
+          map_raster <- rast(OriginRasterPath)
+          crs(map_raster) <- local_crs
+              #We crop and mask the raster to facilitate analysis:
+                  StudyArea<-project(StudyArea,crs(map_raster))
+                  map_raster <- crop(map_raster, StudyArea)
+                  map_raster <- mask(map_raster, StudyArea)  
+          map_raster <- rasterize(points_sf, map_raster, field = Miss_name, fun = "first")
+          if (!dir.exists(NewRasterPath)) {
+                dir.create(NewRasterPath, recursive = TRUE)
+          }
+          writeRaster(map_raster, file=paste0(NewRasterPath, "Miss_",SpeciesMKDE, "_",PlanningTool,".tif"))
+      }
+      
+      #Calculate the additional agreement statistics: 
+      points_sf <- points_sf[!is.na(points_sf[[Miss_name]]), ]
+
+        x<-sum(points_sf[[Miss_name]]) 
+        totalAgreementArea<-sum(points_sf[[Miss_name]] <= 0, na.rm = TRUE)*0.01 
+        relativeAgreementArea<-sum(points_sf[[Miss_name]] <= 0, na.rm = TRUE)/x 
+        oneLevelAreaMiss<-sum(points_sf[[Miss_name]] == 1, na.rm = TRUE)*0.01 
+        oneLevelRelativeAreaMiss<-sum(points_sf[[Miss_name]] == 1, na.rm = TRUE)/x 
+        twoLevelAreaMiss<-sum(points_sf[[Miss_name]] == 2, na.rm = TRUE)*0.01 
+        twoLevelRelativeAreaMiss<-sum(points_sf[[Miss_name]]== 2, na.rm = TRUE)/x 
+        threeLevelAreaMiss<-sum(points_sf[[Miss_name]] == 3, na.rm = TRUE)*0.01 
+        threeLevelRelativeAreaMiss<-sum(points_sf[[Miss_name]] == 3, na.rm = TRUE)/x
+        
+        new_row<-data.frame(
+          SpeciesMKDE=SpeciesMKDE,
+          PlanningTool=PlanningTool, 
+          totalArea=x,
+          totalAgreementArea=totalAgreementArea, 
+          relativeAgreementArea=relativeAgreementArea,
+          oneLevelAreaMiss=oneLevelAreaMiss, 
+          oneLevelRelativeAreaMiss=oneLevelRelativeAreaMiss,
+          twoLevelAreaMiss=twoLevelAreaMiss,
+          twoLevelRelativeAreaMiss=twoLevelRelativeAreaMiss,
+          threeLevelAreaMiss=threeLevelAreaMiss,
+          threeLevelRelativeAreaMiss=threeLevelRelativeAreaMiss)
+        
+        statisticsValues <- rbind(statisticsValues, new_row)
+        
+      
+    write.csv(statisticsValues,paste0("Statistics_", SpeciesMKDE, ".csv"))
+}
+################################
+
+################################
+############INPUTS##############
+  ReclassDataBase<-read.csv("Reclassified_Database.csv")
+  local_crs<-config$local_crs #The same CRS you chose in step 3
+  OriginRasterPath<-"Species_MKDE.tif" #Used as a base to calculate the new raster
+  NewRasterPath<- "RastersMiss/"
+  StudyArea<-vect("Study_area.shp") #Necessary only to cut the raster extension
+
+calulateStatistics(ReclassDataBase,"Species_MKDE_reclass","Planning_tool_reclass",raster=TRUE,OriginRasterPath=OriginRasterPath,NewRasterPath = NewRasterPath)
+```
+
+------------------------------------------------------------------------
+
+## Bibliography
+
+------------------------------------------------------------------------
+
+Benhamou, S. (2011). Dynamic Approach to Space and Habitat Use Based on Biased Random Bridges. *PLoS ONE*, *6*(1), e14592. <https://doi.org/10.1371/journal.pone.0014592>
+
+Benhamou, S., & Riotte-Lambert, L. (2012). Beyond the Utilization Distribution: Identifying home range areas that are intensively exploited or repeatedly visited. *Ecological Modelling*, *227*, 112-116. <https://doi.org/10.1016/j.ecolmodel.2011.12.015>
+
+Calenge, C. (2023). *adehabitatHR: Home Range Estimation* (p. 0.4.21) <https://doi.org/10.32614/CRAN.package.adehabitatHR>
+
+Gupte, P. R., Beardsworth, C. E., Spiegel, O., Lourie, E., Toledo, S., Nathan, R., & Bijleveld, A. I. (2021). A Guide to Pre-Processing High-Throughput Animal Tracking Data. *bioRxiv*, 2020.12.15.422876. <https://doi.org/10.1101/2020.12.15.422876>
+
+Gwet, K. L. (2014). *Handbook of Inter-Rater Reliability* (4.^a^ ed.). Advanced Analytics LLC.
+
+Katzner, T. E., Brandes, D., Miller, T., Lanzone, M., Maisonneuve, C., Tremblay, J. A., Mulvihill, R., & Merovich, G. T. (2012). Topography drives migratory flight altitude of golden eagles: Implications for on‐shore wind energy development. *Journal of Applied Ecology*, *49*(5), 1178-1186. <https://doi.org/10.1111/j.1365-2664.2012.02185.x>
+
+Poessel, S. A., Duerr, A. E., Hall, J. C., Braham, M. A., & Katzner, T. E. (2018). Improving estimation of flight altitude in wildlife telemetry studies. *Journal of Applied Ecology*, *55*(4), 2064-2070. <https://doi.org/10.1111/1365-2664.13135>
+
+Tracey, J. A., Sheppard, J., Zhu, J., Sinkovts, R., Chourasia, A., Lockwood, G., Wang, M., & Fisher, R. N. (2014). *mkde: 2D and 3D Movement-Based Kernel Density Estimates (MKDEs)* (p. 0.3). <https://doi.org/10.32614/CRAN.package.mkde>
