@@ -448,7 +448,7 @@ calculate_population<-function(weighted_column=NA,wd=NA){
          for (i in 1:length(combined_raster)) {
             w_rast <- combined_raster[[i]]
              if (!is.na(weighted_column)) {
-                weight <- as.numeric(combined_info[[weighted_column]][i] / sum(combined_info[[weighted_column]][i]))
+                weight <- as.numeric(combined_info[[weighted_column]][i] / sum(combined_info[[weighted_column]]))
              }else{
                weight <- 1/length(combined_raster)
              }
