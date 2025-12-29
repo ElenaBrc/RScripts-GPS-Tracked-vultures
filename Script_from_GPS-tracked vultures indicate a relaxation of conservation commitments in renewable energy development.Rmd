@@ -452,7 +452,7 @@ calculate_population<-function(weighted_column=NA,wd=NA){
          for (i in 1:length(combined_raster)) {
             w_rast <- combined_raster[[i]]
              if (!is.na(weighted_column)) {
-                weight <- as.numeric(combined_info[[weighted_column]][i] / sum(combined_info[[weighted_column]])
+                weight <- as.numeric(combined_info[[weighted_column]][i] / sum(combined_info[[weighted_column]]))
              }else{
                weight <- 1/length(combined_raster)
              }
@@ -902,4 +902,5 @@ Katzner, T. E., Brandes, D., Miller, T., Lanzone, M., Maisonneuve, C., Tremblay,
 Poessel, S. A., Duerr, A. E., Hall, J. C., Braham, M. A., & Katzner, T. E. (2018). Improving estimation of flight altitude in wildlife telemetry studies. *Journal of Applied Ecology*, *55*(4), 2064-2070. <https://doi.org/10.1111/1365-2664.13135>
 
 Tracey, J. A., Sheppard, J., Zhu, J., Sinkovts, R., Chourasia, A., Lockwood, G., Wang, M., & Fisher, R. N. (2014). *mkde: 2D and 3D Movement-Based Kernel Density Estimates (MKDEs)* (p. 0.3). <https://doi.org/10.32614/CRAN.package.mkde>
+
 
