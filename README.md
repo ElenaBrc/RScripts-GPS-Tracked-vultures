@@ -242,7 +242,7 @@ filter_and_MKDE <- function(dataset, config){
       
       dataset <- filter(dataset, Height_above_ground >= min_height & Height_above_ground <= max_height)
 
-      dataset <- dataset[!is.na(dataset$risk), ]
+      
   }
 
   #Filter by dates:
