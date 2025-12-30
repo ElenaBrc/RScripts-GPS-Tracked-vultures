@@ -246,7 +246,7 @@ filter_and_MKDE <- function(dataset, config){
       
       dataset <- filter(dataset, Height_above_ground >= min_height & Height_above_ground <= max_height)
 
-      dataset <- dataset[!is.na(dataset$risk), ]
+      
   }
 
   #Filter by dates:
@@ -902,5 +902,6 @@ Katzner, T. E., Brandes, D., Miller, T., Lanzone, M., Maisonneuve, C., Tremblay,
 Poessel, S. A., Duerr, A. E., Hall, J. C., Braham, M. A., & Katzner, T. E. (2018). Improving estimation of flight altitude in wildlife telemetry studies. *Journal of Applied Ecology*, *55*(4), 2064-2070. <https://doi.org/10.1111/1365-2664.13135>
 
 Tracey, J. A., Sheppard, J., Zhu, J., Sinkovts, R., Chourasia, A., Lockwood, G., Wang, M., & Fisher, R. N. (2014). *mkde: 2D and 3D Movement-Based Kernel Density Estimates (MKDEs)* (p. 0.3). <https://doi.org/10.32614/CRAN.package.mkde>
+
 
 
